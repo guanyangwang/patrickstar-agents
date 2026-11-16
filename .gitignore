@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.ruff_cache/
+.DS_Store
+.env
+config.json
+mathos-api.json
+*.sqlite3*

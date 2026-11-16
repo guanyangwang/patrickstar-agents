@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "api_key": "YOUR_MATHOS_API_KEY",
+  "model": "YOUR_MODEL_ID",
+  "models": [{"id": "YOUR_MODEL_ID"}]
+}
