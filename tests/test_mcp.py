@@ -8,21 +8,66 @@ import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
 
 @asynccontextmanager
-async def connect(params):
-    async with (
-        stdio_client(params) as (reader, writer),
-        ClientSession(reader, writer) as session,
-    ):
-        await session.initialize()
-        yield session
+async def connect(env):
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "patrickstar_agents.server",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    request_id = 0
+
+    async def send(message):
+        process.stdin.write(json.dumps({"jsonrpc": "2.0", **message}).encode() + b"\n")
+        await process.stdin.drain()
+
+    async def request(method, params):
+        nonlocal request_id
+        request_id += 1
+        await send({"id": request_id, "method": method, "params": params})
+        async with asyncio.timeout(10):
+            while line := await process.stdout.readline():
+                response = json.loads(line)
+                if "id" not in response:
+                    continue  # A server notification.
+                if response["id"] != request_id or "error" in response:
+                    raise AssertionError(response)
+                return response["result"]
+        raise AssertionError(f"Server closed stdout during {method}")
+
+    try:
+        await request("initialize", {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "patrickstar-test", "version": "1"},
+        })
+        await send({"method": "notifications/initialized"})
+        yield request
+    finally:
+        process.stdin.close()
+        try:
+            await asyncio.wait_for(process.wait(), 5)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise
 
 
-class ReconnectTest(unittest.IsolatedAsyncioTestCase):
+class StdioTest(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_discovery_and_error_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            async with connect({"PATRICKSTAR_EXTERNAL_ROOT": directory}) as request:
+                result = await request("tools/list", {})
+                tools = {tool["name"]: tool for tool in result["tools"]}
+                self.assertTrue(tools["external_status"]["annotations"]["readOnlyHint"])
+                self.assertTrue(tools["external_start"]["annotations"]["destructiveHint"])
+                reply = await request("tools/call", {
+                    "name": "external_list", "arguments": {"limit": 0},
+                })
+                self.assertTrue(reply["isError"])
+                self.assertIn("limit must be", reply["content"][0]["text"])
+
     async def test_reconnect_and_continue(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -46,19 +91,15 @@ class ReconnectTest(unittest.IsolatedAsyncioTestCase):
             config = root / "config.json"
             config.write_text(json.dumps({"claude": {"executable": str(cli)}}))
             config.chmod(0o600)
-            params = StdioServerParameters(
-                command=sys.executable,
-                args=["-m", "patrickstar_agents.server"],
-                env={
-                    "PATRICKSTAR_CONFIG": str(config),
-                    "PATRICKSTAR_EXTERNAL_ROOT": str(root / "state"),
-                },
-            )
+            env = {
+                "PATRICKSTAR_CONFIG": str(config),
+                "PATRICKSTAR_EXTERNAL_ROOT": str(root / "state"),
+            }
 
             async def call(session, name, **args):
-                reply = await session.call_tool(name, args)
-                self.assertFalse(reply.isError, reply.content)
-                return reply.structuredContent or json.loads(reply.content[0].text)
+                reply = await session("tools/call", {"name": name, "arguments": args})
+                self.assertFalse(reply.get("isError"), reply["content"])
+                return reply["structuredContent"]
 
             async def finished(session, job):
                 async with asyncio.timeout(15):
@@ -76,7 +117,7 @@ class ReconnectTest(unittest.IsolatedAsyncioTestCase):
                 "request_id": "test-start-01",
                 "timeout_seconds": 30,
             }
-            async with connect(params) as first:
+            async with connect(env) as first:
                 job = (await call(first, "external_start", **request))["id"]
                 async with asyncio.timeout(10):
                     while not (work / "starts").exists():
@@ -87,7 +128,7 @@ class ReconnectTest(unittest.IsolatedAsyncioTestCase):
                 )
 
             (work / "finish").touch()
-            async with connect(params) as second:
+            async with connect(env) as second:
                 jobs = (await call(second, "external_list"))["jobs"]
                 self.assertEqual([j["id"] for j in jobs], [job])
                 result = await finished(second, job)

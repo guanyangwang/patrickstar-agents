@@ -4,9 +4,9 @@ import asyncio
 import json
 import os
 import time
+from importlib.metadata import version
 
-from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from zeromcp import McpServer
 
 from .jobs import ACTIVE, ROOT, Jobs
 
@@ -15,9 +15,9 @@ jobs = Jobs(
     os.environ.get("PATRICKSTAR_EXTERNAL_ROOT", str(ROOT)),
     os.environ.get("PATRICKSTAR_CONFIG"),
 )
-mcp = FastMCP(
+mcp = McpServer(
     "Patrickstar external agents",
-    log_level="WARNING",
+    version=version("patrickstar-agents"),
     instructions="""
 Delegate bounded work to external native Claude Code or Antigravity agents, or
 consult MathOS. Codex remains the coordinator. Only use when the user has asked
@@ -35,21 +35,18 @@ where they can conflict. Do not infer verification from a model's claim; inspect
 actual changes and tests. MathOS is a text consultant and cannot itself run tools.
 """,
 )
-READ = ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
-)
-WRITE = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True
-)
+mcp.tools.redact_exceptions = True
+read_tool = mcp.tool(read_only=True, destructive=False, idempotent=True, open_world=False)
+write_tool = mcp.tool(read_only=False, destructive=True, idempotent=True, open_world=True)
 
 
-@mcp.tool(annotations=READ)
+@read_tool
 def external_catalog() -> dict:
     """List configured providers, exact model IDs and capabilities. No model calls."""
     return jobs.catalog()
 
 
-@mcp.tool(annotations=WRITE)
+@write_tool
 def external_start(
     provider: str,
     prompt: str,
@@ -83,7 +80,7 @@ def external_start(
     )
 
 
-@mcp.tool(annotations=READ)
+@read_tool
 async def external_status(
     job_id: str, after_event: int = 0, wait_seconds: int = 0
 ) -> dict:
@@ -102,13 +99,13 @@ async def external_status(
         await asyncio.sleep(min(0.5, max(0, end - time.monotonic())))
 
 
-@mcp.tool(annotations=READ)
+@read_tool
 def external_result(job_id: str, offset: int = 0, limit: int = 12000) -> dict:
     """Read the saved final/last-turn answer with pagination; does not invoke a model."""
     return jobs.result(job_id, offset, limit)
 
 
-@mcp.tool(annotations=WRITE)
+@write_tool
 def external_continue(
     job_id: str,
     prompt: str,
@@ -137,7 +134,7 @@ def external_continue(
     )
 
 
-@mcp.tool(annotations=WRITE)
+@write_tool
 def external_message(job_id: str, text: str, request_id: str) -> dict:
     """Queue coordinator feedback for the next native turn without interrupting current work.
 
@@ -147,13 +144,13 @@ def external_message(job_id: str, text: str, request_id: str) -> dict:
     return jobs.message(job_id, text, request_id)
 
 
-@mcp.tool(annotations=WRITE)
+@write_tool
 def external_stop(job_id: str) -> dict:
     """Request stopping this job's own local agent process. Does not undo edits or cancel remote Slurm jobs."""
     return jobs.stop(job_id)
 
 
-@mcp.tool(annotations=READ)
+@read_tool
 def external_list(limit: int = 10) -> dict:
     """List recent external jobs for recovery after Codex reconnects. No provider calls."""
     if not 1 <= limit <= 50:
@@ -171,7 +168,7 @@ def external_list(limit: int = 10) -> dict:
 
 
 def main():
-    mcp.run(transport="stdio")
+    asyncio.run(mcp.stdio_async())
 
 
 if __name__ == "__main__":
