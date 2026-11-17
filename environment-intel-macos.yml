@@ -1,0 +1,9 @@
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - cryptography>=50.0.2
+  - pip:
+      - .

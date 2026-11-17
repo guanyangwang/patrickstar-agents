@@ -1,4 +1,5 @@
 .venv/
+.conda-intel/
 __pycache__/
 *.egg-info/
 build/
